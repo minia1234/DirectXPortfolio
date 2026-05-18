@@ -117,9 +117,119 @@ public:
 ```
 
 - `CEngineFSM<CPlayer>` — 멤버 함수 포인터 콜백 등록 FSM
-- Idle / Move / Jump 3-페이즈 상태머신
+- Idle / Move / Jump 3-페이즈 상태머신 (**Stay + Start 2-페이즈**, End는 미사용)
 - 코인 (`m_Coin`) — 상점/식당 통화
-- 액세서리 (`m_AccItem`) — 다중 능력 부여
+- 액세서리 (`m_AccItem`, 4슬롯) — 다중 능력 부여
+
+### 초기화 실측값 / 컴포넌트 계층 / 입력 매핑
+
+```cpp
+bool CPlayer::Init()
+{
+    // 컴포넌트 생성
+    m_Body                = CreateSceneComponent<CRigidBodyComponent>("Body");
+    m_Collider2D          = CreateSceneComponent<CColliderBox2D>("Collider2D");
+    m_Collider2DHorizon   = CreateSceneComponent<CColliderBox2D>("Collider2DHorizon");
+    m_Collider2DVertical  = CreateSceneComponent<CColliderBox2D>("Collider2DVertical");
+    m_Sprite              = CreateSceneComponent<CSpriteComponent>("Sprite");
+    m_Arm                 = CreateSceneComponent<CSpringArm2D>("Arm");
+    m_Camera              = CreateSceneComponent<CCamera>("Camera");
+    m_WidgetComponent     = CreateSceneComponent<CWidgetComponent>("PlayerWidgetComponent");
+
+    SetRootComponent(m_Sprite);
+    m_Sprite->AddChild(m_WidgetComponent);
+    m_Sprite->AddChild(m_Collider2D);
+    m_Sprite->AddChild(m_Collider2DHorizon);
+    m_Sprite->AddChild(m_Collider2DVertical);
+    m_Sprite->AddChild(m_Body);
+    m_Sprite->AddChild(m_Arm);
+    m_Arm->AddChild(m_Camera);
+
+    m_Sprite->SetRelativeScale(15.f, 20.f, 1.f);
+    m_Camera->SetCameraZoom(4.f);
+
+    // 3-Layer Collider Extent
+    m_Collider2D        ->SetExtent(6.f,  10.f);    // 본체 (피격 판정)
+    m_Collider2DHorizon ->SetExtent(6.f,  0.3f);    // 수평 — 위/아래 얇은 막대
+    m_Collider2DVertical->SetExtent(0.3f, 10.f);    // 수직 — 좌/우 얇은 막대
+
+    // Collision Profile + 콜백 (3 콜리전 × Begin/Middle/End 분리)
+    m_Collider2D       ->SetCollisionProfile("Player");
+    m_Collider2DHorizon->SetCollisionProfile("TileCheckCollsion");
+    m_Collider2DVertical->SetCollisionProfile("TileCheckCollsion");
+    m_Collider2D->AddCollisionCallbackFunction<CPlayer>(Collision_State::Begin, this,
+        &CPlayer::CollisionBegin);
+    m_Collider2DHorizon->AddCollisionCallbackFunction(Begin/Middle/End → CollisionHorizonBegin/Middle/End);
+    m_Collider2DVertical->AddCollisionCallbackFunction(Begin/Middle/End → CollisionVerticalBegin/Middle/End);
+
+    // SpringArm 카메라 화면 중앙 보정
+    m_Arm->SetOffset(-640.f, -360.f, 0.f);
+
+    // Animation2D_FSM 세팅
+    m_Sprite->CreateAnimation2D<CAnimation2D_FSM>();
+    m_Animation2D = (CAnimation2D_FSM*)m_Sprite->GetAnimation2D();
+    m_Animation2D->SetIdleAnimation2D("PlayerIdle");
+    m_Animation2D->SetMoveAnimation2D("PlayerRun");
+    m_Animation2D->SetJumpAnimation2D("PlayerJump");
+
+    // 14개 입력 키 콜백 등록
+    CInput::GetInst()->AddKeyCallback("Left",                KT_Push, this, &LeftMove);
+    CInput::GetInst()->AddKeyCallback("Right",               KT_Push, this, &RightMove);
+    CInput::GetInst()->AddKeyCallback("Jump",                KT_Push, this, &JumpMove);
+    CInput::GetInst()->AddKeyCallback("Attack",              KT_Down, this, &Attack);
+    CInput::GetInst()->AddKeyCallback("Dash",                KT_Down, this, &Dash);
+    CInput::GetInst()->AddKeyCallback("MouseWhell",          KT_Down, this, &WeaponChange);
+    CInput::GetInst()->AddKeyCallback("InventoryOnOff",      KT_Down, this, &InventoryOnOff);
+    CInput::GetInst()->AddKeyCallback("MapOnOff",            KT_Down, this, &MapOnOff);
+    CInput::GetInst()->AddKeyCallback("InteractionInputKey", KT_Up,   this, &InputInteractionInputKey);
+    CInput::GetInst()->AddKeyCallback("ShopUI",              KT_Up,   this, &ShopUIOnOff);
+    CInput::GetInst()->AddKeyCallback("StatusUI",            KT_Up,   this, &StatusUIOnOff);
+    CInput::GetInst()->AddKeyCallback("RestaurantUI",        KT_Up,   this, &RestaurantUIOnOff);
+    CInput::GetInst()->AddKeyCallback("ESCUI",               KT_Up,   this, &UIOff);
+    CInput::GetInst()->AddKeyCallback("Skill",               KT_Up,   this, &SkillAttack);
+
+    // WeaponArm 자식으로 추가
+    m_WeaponArm = m_pScene->SpawnObject<CWeaponArm>("basicWeaponArm");
+    m_WeaponArm->SetRelativePos(20.f, 0.f, 0.f);
+    PushObjectChild(m_WeaponArm);
+
+    // FSM 등록 — Stay, Start만 (End 인자 미사용)
+    m_BodyFSM.CreateState("Idle", this, &BodyIdleStay, &BodyIdleStart);
+    m_BodyFSM.CreateState("Move", this, &BodyMoveStay, &BodyMoveStart);
+    m_BodyFSM.CreateState("Jump", this, &BodyJumpStay, &BodyJumpStart);
+    m_BodyFSM.ChangeState("Idle");
+
+    SetGravity(true);
+    m_AccItem.resize(4);                 // 액세서리 슬롯 4개
+    SetStartTimer(0.2f);                 // 진입 0.2초 후부터 동작
+    return true;
+}
+```
+
+- **Horizon Collider (6 × 0.3)** — 가로로 넓고 세로로 얇은 막대 → 위·아래 충돌 감지
+- **Vertical Collider (0.3 × 10)** — 세로로 길고 가로로 얇은 막대 → 좌·우 벽 감지
+- **CollisionProfile** — `Player` (본체) / `TileCheckCollsion` (Horizon, Vertical)
+- **3 Collider × 3 State (Begin/Middle/End) = 7개 콜백** 등록
+- `SpringArm`의 Offset (-640, -360) — 화면 중앙 보정 (1280×720 기준)
+- `SetCameraZoom(4.f)` — 4배 확대
+
+### 방향 / 마우스 추적
+
+```cpp
+void CPlayer::Update(float DeltaTime)
+{
+    Vector2 MousePos = CInput::GetInst()->GetMouse2DWorldPos();
+
+    // 마우스 위치로 좌/우 방향 결정
+    if (GetWorldPos().x > MousePos.x)
+        m_Dir = Object_Dir::Left;
+    else
+        m_Dir = Object_Dir::Right;
+    // ...
+}
+```
+
+마우스 X 좌표로 좌/우 회전 결정 — 무기 회전과 캐릭터 방향 동기화.
 
 ## 충돌 시스템 (3-Layer Collider)
 
@@ -187,7 +297,20 @@ public:
 ```
 
 - 캐릭터마다 한 번만 시퀀스 등록 → 게임 중 상태 변화 시 `ChangeXxx`로 즉시 교체
-- `m_Die` 플래그로 사망 후 일반 상태 전환 차단
+- `SetXxxAnimation2D(Name, Loop)` — `AddAnimationSequence2D` 호출 후 시퀀스 포인터 저장
+- `ChangeXxxAnimation2D()` — 저장된 시퀀스로 `ChangeAnimation` 호출
+
+```cpp
+void CAnimation2D_FSM::SetIdleAnimation2D(const std::string& Name, bool Loop)
+{
+    m_SequenceIdle = AddAnimationSequence2D(Name, Loop);
+}
+
+void CAnimation2D_FSM::ChangeIdleAnimation2D()
+{
+    ChangeAnimation(m_SequenceIdle);
+}
+```
 
 특수 애니메이션 클래스: `CBirdAnimation2D` (시작 화면), `CLifeWaveAnimation2D` (체력 파동 효과).
 
@@ -195,7 +318,7 @@ public:
 
 # Weapon (무기 시스템)
 
-근거리·원거리 무기 6종. 마우스 방향에 따른 회전 처리는 `CWeaponArm`이 담당.
+근거리·원거리 무기 7종. 마우스 방향에 따른 회전 처리는 `CWeaponArm`이 담당.
 
 | 무기 | 종류 | 발사체 / 이펙트 |
 |---|---|---|
@@ -205,6 +328,7 @@ public:
 | `CCosmosSword` | 광역 검 | `CCosmosSwordBullet` + `CCosmosSwordEffect` |
 | `CDaisyRing` | 회전 무기 | — |
 | `CMiniEarth` | 궤도 무기 | — |
+| `CTaana` | 방어형 무기 | `CTaanaShieldEffect` |
 
 - 인벤토리에서 좌/우 무기 슬롯 두 개 보유 → `WeaponChange`로 즉시 교체
 - 무기마다 다른 발사 패턴 / 데미지 / 이펙트
@@ -313,6 +437,87 @@ public:
 | `CBossTorchLight` | 보스방 횃불 |
 | `CBossTresure` | 보스 처치 보상 보물 |
 
+### Belial 초기화 / Update 실측
+
+```cpp
+CBelial::CBelial() :
+    m_AttackTimerMax(3.f),           // 패턴 간 간격
+    m_SwordSpawnTimerMax(0.2f),      // 검 스폰 간격
+    m_BulletFireCountMax(0.2f),      // 탄막 발사 간격
+    m_LaserCountMax(2)               // 레이저 2회
+{
+    SetStatus("Belial");
+}
+
+void CBelial::Start()
+{
+    // 양손 스폰 — 좌측 -100, 우측 +100 + 좌우 반전
+    m_LeftHand  = m_pScene->SpawnObject<CBelialHand>("BelialLeftHand");
+    m_LeftHand->SetRelativePos(GetWorldPos() + Vector3(-100, 0, 0));
+
+    m_RightHand = m_pScene->SpawnObject<CBelialHand>("BelialRightHand");
+    m_RightHand->SetHorizontalReverse2DEnable(true);    // 우측 손은 좌우 반전
+    m_RightHand->SetRelativePos(GetWorldPos() + Vector3(100, 0, 0));
+
+    m_BasicWorldPos = GetWorldPos();   // 기본 위치 회귀용
+}
+
+bool CBelial::Init()
+{
+    // 두 개의 Sprite — 본체 + 뒤 배경 원
+    m_Sprite     = CreateSceneComponent<CSpriteComponent>("Sprite");
+    m_BackSprite = CreateSceneComponent<CSpriteComponent>("BackSprite");
+    m_BackSprite->SetRender2DType(Render_Type_2D::RT2D_Back2);     // 뒷 레이어
+
+    m_Animation2D = (CAnimation2D*)m_Sprite->GetAnimation2D();
+    m_Animation2D->AddAnimationSequence2D("BelialHead_Idle");
+    m_Animation2D->AddAnimationSequence2D("BelialHead_Attack", false);
+    m_Animation2D->SetFrameEndFunction<CBelial>(this, &CBelial::AnimationFrameEnd);
+
+    m_BackAnimation2D->AddAnimationSequence2D("Belial_Circle");
+
+    // 스폰 감지용 박스 — 매우 긴 막대 (2 × 1000), Y축 전체 영역 감지
+    m_SpawnColliderBox2D->SetExtent(2.f, 1000);
+    m_SpawnColliderBox2D->SetCollisionProfile("BossSpawn");
+    m_SpawnColliderBox2D->AddCollisionCallbackFunction(Begin → CollisionBossSpawnBegin);
+
+    m_Collider2D->SetExtent(30.f, 30.f);
+    m_Collider2D->Enable(false);                        // 등장 전에는 비활성
+}
+```
+
+```cpp
+void CBelial::Update(float DeltaTime)
+{
+    if (!m_Spawn) return;            // 스폰 트리거 전엔 동작 안 함
+    AlphaUpdate(DeltaTime);          // 등장 시 페이드인
+
+    if (m_PatternStop)               // 사망 / 일시정지
+    {
+        m_Animation2D->StopPlay();
+        m_LeftHand->StopAnimation();
+        m_RightHand->StopAnimation();
+        if (m_EffectEnd) EffectEndUpdate(DeltaTime);   // 사망 연출
+    }
+    else if (m_SpawnEnd)
+    {
+        PatternUpdate(DeltaTime);    // 정상 패턴 실행
+    }
+
+    // 피격 시 빨간색 깜빡임
+    m_HitTimer -= DeltaTime;
+    CMaterial* Material = m_Sprite->GetMaterial(0);
+    if (m_HitTimer > 0.f)  Material->SetBaseColor(1.f, 0.f, 0.f, m_Alpha);
+    else                   Material->SetBaseColor(1.f, 1.f, 1.f, m_Alpha);
+}
+```
+
+- **양손 좌우 반전** — RightHand는 `SetHorizontalReverse2DEnable(true)`로 미러링
+- **두 개의 Sprite** — 본체 + 뒤 배경 원(`Belial_Circle`, `RT2D_Back2`)
+- **SpawnColliderBox** — 길이 1000짜리 박스로 플레이어 진입 감지
+- **상태 플래그 3종**: `m_Spawn` (등장 트리거), `m_SpawnEnd` (등장 완료), `m_PatternStop` (정지/사망)
+- **HitTimer** — 피격 시 색상 빨간색으로 깜빡임 (Alpha는 유지)
+
 ---
 
 # Inventory (인벤토리 시스템)
@@ -350,6 +555,91 @@ public:
 
 CSV 기반 아이템 데이터: 적·아이템 스탯을 외부 CSV에서 로드해 게임 밸런스를 데이터로 관리.
 
+### 인벤토리 실제 슬롯 구조
+
+```cpp
+bool CInventory::Init()
+{
+    // 4개 무기 슬롯 (좌 1·2, 우 3·4) — 가로 배치
+    for (int i = 0; i < 4; ++i)
+    {
+        CInventoryButton* WeaponButton = CreateWidget<CInventoryButton>("WeaponButton" + str);
+        WeaponButton->SetButtonSlot(InventoryButton_Slot::Weapon);
+        m_Weapon.push_back(WeaponButton);
+    }
+
+    // 무기 슬롯 위에 Left / Right 선택 강조 이미지
+    m_WeaponSelect_Left  = CreateWidget<CImage>("WeaponSelect_Left");
+    m_WeaponSelect_Right = CreateWidget<CImage>("WeaponSelect_Right");
+
+    // 액세서리 슬롯 4개 — 가로 배치
+    for (int i = 0; i < 4; ++i)
+    {
+        CInventoryButton* AccButton = CreateWidget<CInventoryButton>("AccButton" + str);
+        AccButton->SetButtonSlot(InventoryButton_Slot::Acc);
+        m_Accs.push_back(AccButton);
+    }
+
+    // 일반 아이템 그리드 3×5 = 15칸
+    for (int y = 0; y < 3; ++y)
+        for (int x = 0; x < 5; ++x)
+        {
+            CInventoryButton* Btn = CreateWidget<CInventoryButton>("InventoryButton" + str);
+            Btn->SetButtonSlot(InventoryButton_Slot::All);
+            m_Items.push_back(Btn);
+        }
+
+    // 시작 시 7종 무기 인벤토리에 사전 등록
+    Item = m_Scene->SpawnObject<CShortSword>("CShortSword1");      m_Items[5] ->SetItem(Item);
+    Item = m_Scene->SpawnObject<CMetalBoomerang>("MetalBoomerang"); m_Items[2] ->SetItem(Item);
+    Item = m_Scene->SpawnObject<CRevolver>("Revolver");             m_Items[4] ->SetItem(Item);
+    Item = m_Scene->SpawnObject<CCosmosSword>("CosmosSword");       m_Items[7] ->SetItem(Item);
+    Item = m_Scene->SpawnObject<CDaisyRing>("DaisyRing");           m_Items[9] ->SetItem(Item);
+    Item = m_Scene->SpawnObject<CMiniEarth>("MiniEarth");           m_Items[10]->SetItem(Item);
+    Item = m_Scene->SpawnObject<CTaana>("Taana");                   m_Items[11]->SetItem(Item);
+}
+
+void CInventory::Update(float DeltaTime)
+{
+    // 현재 선택 슬롯에 따라 선택 강조 이미지 토글
+    if (m_Current == Select_Weapon::Left)
+    {
+        m_WeaponSelect_Left->Enable(true);
+        m_WeaponSelect_Right->Enable(false);
+    }
+    else
+    {
+        m_WeaponSelect_Left->Enable(false);
+        m_WeaponSelect_Right->Enable(true);
+    }
+
+    // 코인 텍스트 매 프레임 갱신
+    CPlayer* Player = CGlobalValue::MainPlayer;
+    m_CoinText->SetText(std::to_wstring(Player->GetCoin()).c_str());
+}
+
+void CInventory::WeaponChange()
+{
+    // 좌/우 토글
+    m_Current = (m_Current == Select_Weapon::Left)
+        ? Select_Weapon::Right
+        : Select_Weapon::Left;
+}
+
+bool CInventory::AddInventoryItem(CItem* Item)
+{
+    // 빈 슬롯 찾아서 아이템 추가 (가득 차면 false)
+    for (auto Slot : m_Items)
+        if (!Slot->GetItem()) { Slot->SetItem(Item); return true; }
+    return false;
+}
+```
+
+- **슬롯 합계 23개** — 무기 4 + 액세서리 4 + 그리드 15
+- **무기 7종 사전 스폰** + 인벤토리 그리드 슬롯에 미리 배치
+- `CGlobalValue::MainPlayer` 정적 참조로 코인·플레이어 정보 접근
+- `WeaponChange()`는 단순 토글, 실제 무기 교체는 Player가 `GetWeapon()` 호출
+
 ---
 
 # MiniMap (셰이더 기반 미니맵)
@@ -379,6 +669,16 @@ public:
 - 타일 / 오브젝트 / 적 정보를 분리해 Push
 - `MiniMapCBuffer`로 셰이더에 한꺼번에 전달 → 한 패스에 미니맵 렌더
 - 위치별 컬러 / Emissive / Opacity 개별 제어
+
+`CMiniMap` 자체는 얇은 래퍼 — 실제 데이터/렌더는 `CMiniMapWidget`에 위임.
+
+```cpp
+void CMiniMap::PushMiniMapInfoTile  (...) { m_MiniMapWidget->PushMiniMapInfoTile(...);  }
+void CMiniMap::PushMiniMapInfoObject(...) { m_MiniMapWidget->PushMiniMapInfoObject(...); }
+void CMiniMap::PushMiniMapInfoEnemy (...) { m_MiniMapWidget->PushMiniMapInfoEnemy(...);  }
+void CMiniMap::TileUpdate()               { m_MiniMapWidget->TileUpdate(); }
+void CMiniMap::Clear()                    { m_MiniMapWidget->Clear(); }
+```
 
 ---
 
